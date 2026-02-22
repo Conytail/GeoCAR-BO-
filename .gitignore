@@ -1,0 +1,82 @@
+# ============================
+# Python
+# ============================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+equiformer_v2/env/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# ============================
+# Logs & Debug files
+# ============================
+*.log
+debug.log
+*.txt
+!README*.txt
+!equiformer_v2/README.md
+
+# TensorFlow events
+events.out.tfevents.*
+
+# ============================
+# Large data directories (exclude entirely)
+# ============================
+publication_data/
+data/
+esmfold_results/
+套磁&文献/
+
+# ============================
+# Model checkpoints & training outputs
+# ============================
+equiformer_v2/checkpoints/
+equiformer_v2/logs/
+equiformer_v2/results/
+equiformer_v2/datasets/
+equiformer_v2/nets/equiformer_v2/__pycache__/
+
+# ============================
+# Large model weight files
+# ============================
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.npy
+*.npz
+*.lmdb
+*.pkl
+
+# ============================
+# Test / sample output files
+# ============================
+test/*.pdb
+test/*.pae.txt
+test/*.png
+
+# ============================
+# OS files
+# ============================
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+*.orig

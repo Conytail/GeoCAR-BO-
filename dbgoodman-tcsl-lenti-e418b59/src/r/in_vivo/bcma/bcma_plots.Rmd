@@ -1,0 +1,135 @@
+---
+title: "BCMA BAFFR Plots"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(data.table)
+library(patchwork)
+library(cowplot)
+library(tidyverse)
+library(zoo)
+
+# load colors
+source(here::here("r",'fig_colors.R'))
+
+
+# load measurements
+tumor_measurements_fn <- here::here("r","in_vivo","bcma",'bcma.data.csv')
+
+tumor_measurements <- fread(tumor_measurements_fn)
+
+# remove values where there is nothing written in the avg.radiance (aka when the mouse died)
+tumor_measurements <- tumor_measurements[avg.radiance != 'NA']
+
+
+##plot each mouse individually by group
+plot.data <- tumor_measurements[day<32 &
+  scfv!="BC50" & scfv!="BC30" &
+  costim!="Zeta" & costim!="PBS"]
+  
+#rename baffr to work with CAR colors
+plot.data[costim=='BAFFR', costim := 'BAFF-R']
+
+##this is fixing it so that we incorporate trac ko as the same color as unt. 
+##first we find what costims are unique
+plot_car_colors <- car_colors[unique(plot.data$costim)]
+#remove na because that's what trac ko becomes
+plot_car_colors <- plot_car_colors[!is.na(plot_car_colors)]
+#assign it the right color from original choices
+plot_car_colors['TRAC KO'] <- car_colors['Unt']
+
+#this changes the order that it shows the plots in within ggplot
+plot.data[, costim := 
+  factor(costim, levels=c("41BB", "CD28", "BAFF-R", "TRAC KO"))]
+
+tumor_growth_plot <- ggplot(plot.data,
+    aes(y=(avg.radiance), x=day, color=costim,
+        group=interaction(exp.num, scfv, costim, mouse.num),
+        linetype=factor(exp.num))) + 
+          ## line type is the dashed vs solid. solid is linetype 1
+    geom_line() +
+    geom_point() + 
+    scale_y_log10(
+      breaks = trans_breaks("log10", function(x) 10^x),
+      labels = trans_format("log10", math_format(10^.x))) +
+    scale_color_manual(values=plot_car_colors) +
+    theme_minimal() +
+    labs(
+      title="BCMA MM1S Tumor Growth Curves",
+      x="Days Post T cell Injection",
+      y="Radiance (log10)",
+      color='Costim Domains',
+      linetype='Donor')+
+    facet_wrap(c("costim"), ncol=4) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      #axis.line = element_line(colour = "black"),
+      plot.title = element_text(hjust = 0.5),
+      panel.border=element_rect(color='black', fill=NA))
+```
+
+```{r}
+
+rad_me_data <- plot.data[,
+    list(exp.num, costim=relevel(costim, ref='TRAC KO'),
+    mouse.num=factor(paste(mouse.num, exp.num, sep='.')), 
+    log2.rad= log2(avg.radiance), 
+    day=ordered(day))]
+
+as.numeric.char <- function(x) as.numeric(as.character(x))
+
+# expand to all possible ordinal days among measurements
+rad_me_expanded <- rad_me_data[, 
+  expand.grid(
+    day=rad_me_data[, seq(
+      min(as.numeric.char(day)),
+      max(as.numeric.char(day)))],
+    mouse.num= unique(mouse.num))]
+
+rad_me_data_interpolated <- copy(rad_me_data)[,
+  day := as.numeric.char(day)][
+    rad_me_expanded,  
+    on=.(day, mouse.num), nomatch=NA]
+  
+setorderv(rad_me_data_interpolated, c("mouse.num","day"))
+
+rad_me_data_interpolated[, exp.num := na.omit(unique(exp.num)), by=mouse.num]
+rad_me_data_interpolated[, costim := na.omit(unique(costim)), by=mouse.num]
+
+# interpolate missing days linearly
+rad_me_data_interpolated[,
+  log2.rad.interpolated := na.approx(log2.rad[order(day)], na.rm=F),
+  by=mouse.num]  
+  
+# relative to earliest day with data
+rad_me_data_interpolated[, 
+  log2.rad.interpolated.rel := (
+    log2.rad.interpolated - log2.rad.interpolated[
+      day==min(day[!is.na(log2.rad.interpolated)])]),
+  by=.(mouse.num)]
+
+rad_me_data_interpolated_auc <- rad_me_data_interpolated[
+    !is.na(log2.rad.interpolated.rel)][,
+      `:=`(
+        auc= sum(log2.rad.interpolated.rel, na.rm=T), 
+        final.day= day==max(day),
+        tumormax.day= day==day[which.max(log2.rad.interpolated.rel)]),
+        by=.(mouse.num)]
+
+ggplot(rad_me_data_interpolated_auc,
+  aes(x=costim, y=auc, color=exp.num)) + 
+  geom_jitter(height=0) + 
+  stat_compare_means(comparisons=list(c('BAFF-R','CD28'), c('BAFF-R','41BB'), c('CD28','41BB'), c('BAFF-R','TRAC KO'))) + labs('Area under the curve, relative to initial tumor size')
+
+ggplot(rad_me_data_interpolated_auc, aes(x=day, y=log2.rad.interpolated.rel, group=mouse.num, color=costim, label=round(auc,2))) + 
+  geom_point(aes(size=max.day)) + 
+  geom_line() + 
+  geom_text_repel(
+    data=rad_me_data_interpolated_auc[max.day==T], color='black') +
+  facet_wrap(~costim)
+```
+

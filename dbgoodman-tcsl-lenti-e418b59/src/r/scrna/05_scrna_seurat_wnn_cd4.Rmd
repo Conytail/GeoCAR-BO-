@@ -1,0 +1,260 @@
+---
+title: "04_scrna_seurat_wnn"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(VISION)
+library(data.table)
+library(cowplot)
+library(Seurat)
+
+SEURAT_RDS_FILE <- here::here(
+    '..','..','scrnaseq_tcsl154',
+    'rds','scrna.hashed.rds')
+
+STIMULATORY_CARS <- c('4-1BB','BAFF-R','CD40','TACI','CD28','Zeta')
+
+source(here::here('r','scrna','scrna_analysis_fxns.R'))
+source(here::here('r','fig_colors.R'))
+```
+
+## Multimodal WNN
+
+https://satijalab.org/seurat/v4.0/weighted_nearest_neighbor_analysis.html
+
+```{r setup, include=FALSE}
+scrna_cd4_all_output <- sct_umap(subset(
+  readRDS(SEURAT_RDS_FILE),
+  subset=(CD4v8 == 'CD4' & car != 'K_only')), title='CD4 ALL')
+scrna_cd4_all <- scrna_cd4_all_output$obj
+saveRDS(scrna_cd4, here::here(
+  '..','..','scrnaseq_tcsl154',
+  'rds','scrna.wnn.cd4.rds'))
+#scrna_cd4_all <- readRDS("~/scrnaseq_tcsl154/rds/scrna.wnn.cd4.all.rds")
+
+scrna_cd4_output <- sct_umap(subset(
+  readRDS(SEURAT_RDS_FILE),
+  subset=(CD4v8 == 'CD4' & car != 'K_only' & k_type == 'CD19+')), title='CD4 CD19+')
+scrna_cd4 <- scrna_cd4_output$obj
+saveRDS(scrna_cd4_all, here::here(
+  '..','..','scrnaseq_tcsl154',
+  'rds','scrna.wnn.cd4.all.rds'))
+#scrna_cd4 <- readRDS("~/scrnaseq_tcsl154/rds/scrna.wnn.cd4.rds")
+
+scrna_cd4_all <- map_clusters(
+  from_obj=scrna_cd4,
+  to_obj=scrna_cd4_all,
+  from_cluster_name='seurat_clusters',
+  to_cluster_name='act_clusters')
+
+# DimPlot(scrna_cd4_all_output$obj, reduction='wnn.umap', group.by='act_clusters', label=T)
+
+# DimPlot(
+#   scrna_cd4_all_output$obj,
+#   cols=cluster_act_cd4$activation_colors$fill[order(cluster_act_cd4$activation_colors$x)],
+#   label=T, reduction='wnn.umap')
+
+FeaturePlot(scrna_cd4,
+  features=c(
+    'HSP90AB1','LDHA','BNIP3','LGALS1','CD74','IL7R',
+    'PGK1','CD52','HOPX','CCL5','STAT1','LTB','LTA',
+    'HLA-DRB1','IFNG','GATA3','IL13','IL5','NKG7','ITGB1'), 
+  ncol=5, reduction='wnn.umap', label=T)
+
+```
+
+## VISION
+
+```{r}
+
+# Read in expression counts (Genes X Cells, gene names as rownames)
+counts <- data.frame(scrna_cd8@assays[["SCT"]]@counts)
+
+# Read in expression counts (Genes X Cells, gene names as rownames)
+n.umi <- colSums(counts)
+scaled_counts <- t(t(counts) / n.umi) * median(n.umi)
+
+rm(n.umi)
+rm(counts)
+gc()
+
+### Adjust metadata to get signature associations
+
+meta <- scrna_cd8@meta.data[gsub('-','.',rownames(scrna_cd8@meta.data)) %in% colnames(scaled_counts),]
+rownames(meta) <- gsub('-','.',rownames(meta))
+
+# extract useful metadata columns
+meta_columns = c('k_type','car','CD4v8', cluster_name)
+
+meta <- meta[, meta_columns]
+# make a combined column with all combinations of the two
+meta$tnfr_new <- meta$car
+meta$tnfr <- meta$car
+meta$tnfr_new[meta$car %in% c('CD40','TACI','BAFF-R')] <- 'TNFR_new'
+meta$tnfr[meta$car %in% c('CD40','TACI','BAFF-R','4-1BB')] <- 'TNFR'
+
+#latent space
+latent.space <- scrna_cd8@reductions$wnn.umap@cell.embeddings
+rownames(latent.space) <- gsub('-','.',rownames(latent.space))
+
+# Make vision object
+vis <- Vision(
+  scaled_counts, 
+  meta=meta, 
+  signatures = here::here('..','data',paste0(c('h','c2'),'.all.v7.1.symbols.gmt')), 
+  latentSpace=latent.space)
+
+gc()
+options(mc.cores = 8)
+vis <- analyze(vis)
+```
+
+# plot of signatures
+
+```{r}
+sig_corr <- getSignatureAutocorrelation(vis)
+sig_corr <- data.table(sig_corr, keep.rownames=T)[C > 0.2]
+names(sig_corr)[1] <- 'signature'
+
+sig_diffs_clust <- getSignatureDifferential(vis)$wsnn_res.1.3
+
+for(cluster in names(sig_diffs_clust)) {
+  sig_diffs_clust[[cluster]]['cluster'] <- cluster
+  sig_diffs_clust[[cluster]]['signature'] <- rownames(sig_diffs_clust[[cluster]])
+}
+
+sig_diffs_clust <- data.table(rbindlist(sig_diffs_clust), keep.rownames=T)[signature %in% sig_corr$signature]
+
+cast_clust_scores <- dcast(sig_diffs_clust, signature ~ cluster, value.var='stat')
+
+clust_sig_cor <- cor(t(cast_clust_scores[, -1]))
+clust_cor <- cor(cast_clust_scores[, -1])
+
+dendro_m_sig <- as.matrix(clust_sig_cor)
+rownames(dendro_m_sig) <- cast_clust_scores$signature
+dendro_sig <- as.dendrogram(hclust(d = dist(x = dendro_m_sig)))
+dendro_sig <- rotate(dendro_sig, names(sort(rowMeans(dendro_m_sig))))
+
+# melt and reorder rows
+sig_diffs_clust$signature <- factor(
+    sig_diffs_clust$signature,
+    levels = labels(dendro_sig))
+
+dendro_m_clust <- as.matrix(clust_cor)
+dendro_clust <- as.dendrogram(hclust(d = dist(x = dendro_m_clust)))
+dendro_clust <- rotate(dendro_clust, names(sort(rowMeans(dendro_m_clust))))
+
+# melt and reorder rows
+sig_diffs_clust$cluster <- factor(
+    sig_diffs_clust$cluster,
+    levels = labels(dendro_clust))
+
+ggplot(sig_diffs_clust[signature %in% cast_clust_scores[`9` > 0.75 | `9` < 0.25, signature]]) + 
+  geom_tile(aes(x=signature, y=factor(cluster), fill=stat)) + 
+  scale_fill_distiller(palette='RdYlBu') + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  coord_flip()
+
+signature_plot <- function(seurat_obj, vis_obj, this_signature) {
+
+  this_sig_geneset <- vis_obj@SigGeneImportance[[this_signature]]
+  ordered_filtered_sig_geneset <- sort(
+    this_sig_geneset[intersect(VariableFeatures(seurat_obj, assay='RNA'), names(this_sig_geneset))],
+    decreasing=T)
+  
+  gene_score <- ggplot(data.table(gene=names(ordered_filtered_sig_geneset), score=(ordered_filtered_sig_geneset))) + 
+    geom_tile(aes(x='score', y=reorder(gene, score), fill=score)) + 
+    scale_fill_distiller(
+      palette='RdBu', 
+      limits=c(-max(abs(ordered_filtered_sig_geneset)), max(abs(ordered_filtered_sig_geneset)))) + 
+    labs(x='',y='') + theme_minimal() + 
+    theme(panel.grid=element_blank()) + 
+    scale_x_discrete(expand=c(0,0))
+  
+  plot_grid(
+    DoHeatmap(seurat_obj,
+    features=names(ordered_filtered_sig_geneset), 
+    assay='RNA', group.by = cluster_name),
+    plot_grid(
+        cluster_car_pct_plot(seurat_obj, cluster_name),
+        plot_sig_by_car(seurat_obj, vis_obj, this_signature, x_lab=this_signature), 
+        plot_sig_by_cluster(seurat_obj, vis_obj, this_signature, x_lab=this_signature, cluster_col=cluster_name), ncol=1),
+    ncol=2,
+    align = 'h', axis = 'tb')
+}
+  
+
+```
+
+
+## Map CM from ADT on top of clusters
+
+```{r}
+scrna_cd8_all <- subset(
+  readRDS(SEURAT_RDS_FILE), 
+  subset=(CD4v8 == 'CD8' & car != 'K_only'))
+
+density_bar_plots(make_citeseq_dt(scrna_cd8_all), x_axis='CD45RO.adt', x_cutoff=0.25, y_axis='CD62L.adt', y_cutoff=0.6, title='CD8 RO v 62L')
+density_bar_plots(make_citeseq_dt(scrna_cd8_all), x_axis='CD45RA.adt', x_cutoff=0.7, y_axis='CD62L.adt', y_cutoff=0.6, title='CD8 RA v 62L')
+density_bar_plots(make_citeseq_dt(scrna_cd8_all), x_axis='CD45RA.adt', x_cutoff=0.7, y_axis='CD45RO.adt', y_cutoff=0.25, title='CD8 RA v RO')
+
+# CD45RO+, CD62L+
+DimPlot(scrna_cd8, group.by=cluster_name, cells=make_citeseq_dt(scrna_cd8)[CD62L.adt > 0.6 & CD45RA.adt < 0.7  & car %in% c('BAFF-R','CD28'), cell.id]) + DimPlot(scrna_cd8, group.by='car', cells=make_citeseq_dt(scrna_cd8)[CD62L.adt > 0.6 & CD45RA.adt < 0.7 & car %in% c('BAFF-R','CD28'), cell.id])
+
+# CD45RO+, CD62L+
+DimPlot(scrna_cd8, group.by=cluster_name, cells=make_citeseq_dt(scrna_cd8)[CD62L.adt > 0.6 & CD45RO.adt > 0.25  & car %in% c('BAFF-R','CD28'), cell.id]) + DimPlot(scrna_cd8, group.by='car', cells=make_citeseq_dt(scrna_cd8)[CD62L.adt > 0.6 & CD45RO.adt > 0.25 & car %in% c('BAFF-R','CD28'), cell.id])
+
+##NEXT: does this (BAFFR has more T memory cells) still hold when looking only at clusters that arent 4,5,8,0,2?
+##Also: redo with 4,5,8,0,2 removed
+##Also: do CD4s
+
+DefaultAssay(scrna_cd4) <- 'SCT_ADT'; FeaturePlot(scrna_cd4, reduction = 'wnn.umap', features=data.table(FindMarkers(
+    scrna_cd4, assay='SCT_ADT',
+    ident.1 = '4',
+    logfc.threshold = 0.5, min.pct=0.25), keep.rownames = T)[1:10, rn],label=T)
+```
+
+## CAR vs cluster
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+car_clust_pct <- data.table(scrna_cd4@meta.data)[, .N, 
+  by=c('car',cluster_name)][, 
+    pct_car := N/sum(N), by='car'][,
+      clust_count := sum(N), by=cluster_name][,
+        log2_clust_enrich := log2(pct_car/mean(pct_car)), by=cluster_name]
+
+car_clust_pct[, log2_ce_trunc := ifelse(
+  test= abs(log2_clust_enrich) > 2, 
+  yes= 2 * sign(log2_clust_enrich), 
+  no= log2_clust_enrich)]
+
+ggplot(car_clust_pct) + 
+  geom_point(aes(
+    x=get(cluster_name),
+    y=factor(car, c("CD28","4-1BB","BAFF-R","TACI","CD40","TNR8","Zeta","KLRG1","Untransduced")),
+    color=log2_ce_trunc, size=pct_car)) + 
+  scale_color_distiller(palette='PRGn', direction=1) + scale_size(range=c(1,10)) + theme_minimal()
+
+car_clust_pct_act <- data.table(scrna_cd4@meta.data)[!(car %in% c('KLRG1','Untransduced')), .N, 
+  by=c('car',cluster_name)][, 
+    pct_car := N/sum(N), by='car'][,
+      clust_count := sum(N), by=cluster_name][,
+        log2_clust_enrich := log2(pct_car/mean(pct_car)), by=cluster_name]
+
+car_clust_pct_act[, log2_ce_trunc := ifelse(
+  test= abs(log2_clust_enrich) > 1, 
+  yes= 1 * sign(log2_clust_enrich), 
+  no= log2_clust_enrich)]
+
+ggplot(car_clust_pct_act) + 
+  geom_point(aes(
+    x=get(cluster_name),
+    y=factor(car, c("CD28","4-1BB","BAFF-R","TACI","CD40","TNR8","Zeta","KLRG1","Untransduced")),
+    color=log2_ce_trunc, size=pct_car)) + 
+  scale_color_distiller(palette='PRGn', direction=1) + scale_size(range=c(1,10)) + theme_minimal()
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

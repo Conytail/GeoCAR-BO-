@@ -1,0 +1,194 @@
+
+---
+title: "TCSL154 scRNA Analysis - 02 - subset_analysis"
+output:
+  html_document:
+    df_print: paged
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here('..','html'))})
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyr)
+library(tidyr)
+library(Seurat)
+library(patchwork)
+library(cluster)
+library(parallelDist)
+library(ggplot2)
+library(data.table)
+library(cowplot)
+library(doParallel)
+
+# BiocManager::install("clusterProfiler", version = "3.8")
+# BiocManager::install("pathview")
+# BiocManager::install("enrichplot")
+# BiocManager::install(organism, character.only = TRUE)
+library(clusterProfiler)
+library(enrichplot)
+library(ggplot2)
+
+organism = "org.Hs.eg.db"
+library(organism, character.only = TRUE)
+library(ReactomePA)
+
+reload_data=F
+source(here::here('r','fig_colors.R'))
+source(here::here('r','scrna','scrna_analysis_fxns.R'))
+
+
+if (!('scrna.hashed' %in% ls()))
+  scrna.hashed <- readRDS(here::here(
+    '..','..','scrnaseq_tcsl154',
+    'rds','scrna.hashed.rds'))
+
+```
+
+## CiteSeq Subsetting
+
+```{r fig.width=15, fig.height=8, unit="inches", eval=F}
+
+#### RO v 62L
+# BAFF-R has enriched 62L+/RO+ population in CD8s only
+plot_grid(
+  density_bar_plots(make_citeseq_dt(scrna.cd4), x_axis='CD45RO.adt', x_cutoff=0.25, y_axis='CD62L.adt', y_cutoff=0.6, title='CD4 RO v 62L'),
+  density_bar_plots(make_citeseq_dt(scrna.cd8), x_axis='CD45RO.adt', x_cutoff=0.25, y_axis='CD62L.adt', y_cutoff=0.6, title='CD8 RO v 62L'),
+  ncol=2
+)
+
+#### RO v CCR7
+plot_grid(
+  density_bar_plots(make_citeseq_dt(scrna.cd4), x_axis='CD45RO.adt', x_cutoff=0.25, y_axis='CCR7.adt', y_cutoff=0.3, title='CD4 RO v CCR7'),
+  density_bar_plots(make_citeseq_dt(scrna.cd8), x_axis='CD45RO.adt', x_cutoff=0.25, y_axis='CCR7.adt', y_cutoff=0.3, title='CD8 RO v CCR7'),
+  ncol=2
+)
+
+#### RO+, CD62L v CCR7
+plot_grid(
+  density_bar_plots(make_citeseq_dt(scrna.cd4)[CD45RO.adt > 0.25], x_axis='CD62L.adt', x_cutoff=0.6, y_axis='CCR7.adt', y_cutoff=0.25, title='CD4, RO+, 62L v CCR7'),
+  density_bar_plots(make_citeseq_dt(scrna.cd8)[CD45RO.adt > 0.25], x_axis='CD62L.adt', x_cutoff=0.6, y_axis='CCR7.adt', y_cutoff=0.25, title='CD8, RO+, 62L v CCR7'),
+  ncol=1
+)
+
+#### RO+, CD62L v CD27
+plot_grid(
+  density_bar_plots(make_citeseq_dt(scrna.cd4)[CD45RO.adt > 0.25], x_axis='CD62L.adt', x_cutoff=0.6, y_axis='CD27.adt', y_cutoff=0.4, title='CD4, RO+, 62L v CD27'),
+  density_bar_plots(make_citeseq_dt(scrna.cd8)[CD45RO.adt > 0.25], x_axis='CD62L.adt', x_cutoff=0.6, y_axis='CD27.adt', y_cutoff=0.4, title='CD8, RO+, 62L v CD27'),
+  ncol=2
+)
+
+#### RO+, CCR7 v CD49b
+plot_grid(
+  density_bar_plots(make_citeseq_dt(scrna.cd4)[CD45RO.adt > 0.25], x_axis='CCR7.adt', x_cutoff=0.25, y_axis='CD49b.adt', y_cutoff=0.6, title='CD4 CCR7 v 49b'),
+  density_bar_plots(make_citeseq_dt(scrna.cd8)[CD45RO.adt > 0.25], x_axis='CCR7.adt', x_cutoff=0.25, y_axis='CD49b.adt', y_cutoff=0.6, title='CD8 CCR7 v 49b'),
+  ncol=2
+)
+```
+
+# UMAP plots and objects for each subset
+
+```{r umap_each_subset, eval=reload_data}
+
+
+# this_subset <- subset_fxns[[11]](scrna.hashed)
+# plot_title_text <- "CD8.CD19.stimulatory RNA"
+# assay='RNA'; cluster_resolution=0.8; save=T; save_plots=T; rerun=F; return_all=F;
+```
+
+## Run all groups
+```{r}
+stimulatory_cars <- c('4-1BB','BAFF-R','CD40','TACI','CD28','Zeta')
+
+if (!reload_data && !('umap_plots' %in% ls()) )
+{
+  umap_plots <- readRDS(here::here(
+    '..','..','scrnaseq_tcsl154',
+    'rds','scrna.umap.plots.rds')) 
+} else {
+  subset_fxns= list(
+      
+      # all cars
+      function(obj) subset(obj, subset = (car != 'K_only')),
+      function(obj) subset(obj, subset = (CD4v8 == 'CD4' & car != 'K_only')),
+      function(obj) subset(obj, subset = (CD4v8 == 'CD8' & car != 'K_only')),
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & car != 'K_only')),
+      
+      # stimulated 4s and 8s
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & CD4v8 == 'CD4' & car != 'K_only')),
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & CD4v8 == 'CD8' & car != 'K_only')),
+      
+      
+      #unstimulated 4s and 8s
+      function(obj) subset(obj, subset = (k_type == 'baseline' & car != 'K_only')),
+      function(obj) subset(obj, subset = (k_type == 'baseline' & CD4v8 == 'CD4' & car != 'K_only')),
+      function(obj) subset(obj, subset = (k_type == 'baseline' & CD4v8 == 'CD8' & car != 'K_only')),
+      
+      #stimulatory cars only
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & CD4v8 == 'CD4' & car %in% stimulatory_cars)),
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & CD4v8 == 'CD8' & car %in% stimulatory_cars)),
+  
+      #stimulatory cars, central memory
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & CD4v8 == 'CD4' & car %in% stimulatory_cars &
+        CD45RO.adt > 0.25 & CD62L.adt > 0.6)),
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & CD4v8 == 'CD8' & car %in% stimulatory_cars &
+        CD45RO.adt > 0.25 & CD62L.adt > 0.6)),
+      #stimulatory cars, effector memory
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & CD4v8 == 'CD4' & car %in% stimulatory_cars &
+        CD45RO.adt > 0.25 & CD62L.adt < 0.6)),
+      function(obj) subset(obj, subset = (k_type == 'cd19+' & CD4v8 == 'CD8' & car %in% stimulatory_cars &
+        CD45RO.adt > 0.25 & CD62L.adt < 0.6))
+    )
+
+
+  subset_names= c('All','CD4','CD8','CD19',
+                  'CD4.CD19','CD8.CD19',
+                  'baseline','CD4.baseline', 'CD8.baseline',
+                  'CD4.CD19.stimulatory','CD8.CD19.stimulatory',
+                  'CD4.CD19.stimulatory.tcm','CD8.CD19.stimulatory.tcm',
+                  'CD4.CD19.stimulatory.teff','CD8.CD19.stimulatory.teff')
+  
+  umap_plots <- data.table(subset_name= subset_names, subset_fxn_num=1:length(subset_fxns))
+  
+  # umap_plots[, ADT := list(list(
+  #     umap_subset(subset_fxns[[subset_fxn_num]](scrna.hashed), plot_title_text=paste0(.BY[1],' ADT'), assay='ADT'))),
+  #     by='subset_name']
+  
+  # umap_plots[, RNA := list(list(
+  #   umap_subset(subset_fxns[[subset_fxn_num]](scrna.hashed), 
+  #     plot_title_text=paste0(.BY[1],' RNA'), assay='RNA'))), 
+  #   by='subset_name']
+  
+  umap_plots[c(1,2,3,4,5,6,7,8,9,10,11), RNA := list(list(
+    umap_subset(subset_fxns[[subset_fxn_num]](scrna.hashed), 
+      plot_title_text=paste0(.BY[1],' RNA'), assay='RNA'))), 
+    by='subset_name']
+
+  # saveRDS(umap_plots, file = here::here(
+  #     '..','..','scrnaseq_tcsl154',
+  #     'rds','scrna.umap.plots.rds'))
+}
+
+```
+
+## Show UMAP Plots
+
+### ADT plots
+
+```{r, fig.width=18, fig.height=10}
+
+if (!('umap_plots' %in% ls()))
+  umap_plots <- readRDS(here::here(
+    '..','..','scrnaseq_tcsl154',
+    'rds','scrna.umap.plots.rds'))
+
+umap_plots[, print(ADT[[1]]), by='subset_name']
+```
+
+### RNA plots
+
+```{r, fig.width=18, fig.height=10}
+
+umap_plots[, print(RNA[[1]]$cluster_plot), by='subset_name']
+```
