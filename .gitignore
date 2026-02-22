@@ -17,7 +17,8 @@ venv/
 env/
 equiformer_v2/env/
 
-# Jupyter Notebooks checkpoints
+# Jupyter Notebooks
+*.ipynb
 .ipynb_checkpoints/
 
 # ============================
